@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>Singapore MRT Map Demo (Google Maps)</title>
+		
+		<!-- ---------------------------------------- -->
+		<!-- 1. Google Maps API script -->
+		<!--    - `key`: Replace with your actual API key -->
+		<!--    - `callback=initMap`: Calls the global initMap function once the API is loaded -->
+		<!--    - `libraries=marker`: Includes the new Google Maps Marker library (optional, but good practice for newer features) -->
+		<!-- ---------------------------------------- -->
+		<script async defer src="https://maps.googleapis.com/maps/api/js?key=AIzaSyAOVYRIgupAurZup5y1PRh8Ismb1A3lLao&callback=initMap&libraries=marker"></script>
+		
+		<!-- ---------------------------------------------- -->
+		<!-- 2. Google MarkerClusterer library -->
+		<!-- ---------------------------------------------- -->
+		<script src="./js/index.min.js"></script>
+		
+		<style>
+			/* ---------------------------------------------------------------- */
+			/* Global reset: remove default margins and set full-height layout */
+			/* ---------------------------------------------------------------- */
+			html, body {
+				margin: 0;
+				padding: 0;
+				height: 100%;
+			}
+			/* The map container will fill the entire viewport */
+			#map {
+				width: 100%;
+				height: 100vh;
+			}
+			
+			/* ----------------------------- */
+			/* Simple toast notification box */
+			/* ----------------------------- */
+			#toast {
+				position: absolute;
+				top: 1rem;
+				right: 1rem;
+				background: rgba(0, 0, 0, 0.8);
+				color: #fff;
+				padding: 0.75rem 1rem;
+				border-radius: 4px;
+				font-size: 0.9rem;
+				opacity: 0;
+				transition: opacity 0.3s ease;
+				pointer-events: none; /* Ignore clicks */
+				z-index: 1000;        /* Ensure on top of map */
+			}
+			/* When .show class is added, the toast fades in */
+			#toast.show {
+				opacity: 1;
+			}
+			
+			/* ---------------------------------------------------- */
+			/* Popup styling: rounded corners + scrollable          */
+			/* Note: Google Maps InfoWindow uses its own structure, */
+			/* so these classes apply to the content *inside* it.  */
+			/* ---------------------------------------------------- */
+			/* The main wrapper of the InfoWindow can be styled by targeting .gm-style-iw */
+			/* but we mostly control the content div here. */
+			
+			.gm-style-iw-d { /* Default InfoWindow content wrapper */
+				overflow-y: auto !important; /* Ensure content is scrollable */
+				max-height: 300px; /* Limit height */
+				padding-right: 15px; /* Room for scrollbar */
+			}
+			
+			.mrt-popup-content {
+				padding: 0.5rem; /* Padding for the custom content inside InfoWindow */
+			}
+			.mrt-popup-content h4 {
+				margin: 0 0 0.5rem;
+				font-size: 1.1rem;
+				color: #333;
+			}
+			.mrt-popup-content .popup-image {
+				max-width: 100%;
+				height: auto;
+				margin-bottom: 0.75rem;
+				border-radius: 4px;
+			}
+			.mrt-popup-content p {
+				font-size: 0.9rem;
+				margin: 0 0 0.75rem;
+				color: #555;
+				line-height: 1.4;
+			}
+			.mrt-popup-content table {
+				width: 100%;
+				border-collapse: collapse;
+				margin-bottom: 0.75rem;
+				font-size: 0.85rem;
+			}
+			.mrt-popup-content table td {
+				padding: 4px 0;
+				border-bottom: 1px solid #eee;
+			}
+			.mrt-popup-content table tr:last-child td {
+				border-bottom: none;
+			}
+			.mrt-popup-content table td:first-child {
+				font-weight: 500;
+				white-space: nowrap;
+				padding-right: 10px;
+			}
+			.mrt-popup-content .popup-button {
+				display: block;
+				width: 100%;
+				padding: 8px 12px;
+				background-color: #007bff;
+				color: white;
+				border: none;
+				border-radius: 4px;
+				text-align: center;
+				text-decoration: none;
+				cursor: pointer;
+				font-size: 0.9rem;
+				font-weight: 600;
+				transition: background-color 0.2s;
+			}
+			.mrt-popup-content .popup-button:hover {
+				background-color: #0056b3;
+			}
+		</style>
+	</head>
+	<body>
+		<!-- Map container -->
+		<div id="map"></div>
+		
+		<!-- Toast notification box -->
+		<div id="toast" aria-live="polite"></div>
+		
+		<script type="module">
+			/**
+			* -----------------------------------------------------
+			* 1. Configuration object:
+			*    - mapCenter: [latitude, longitude] for initial view
+			*    - mapZoom: initial zoom level
+			*    - locale & messages: support for English only in demo
+			*/
+			const CONFIG = {
+				mapCenter: [1.3521, 103.8198],
+				mapZoom: 12,
+				// Google Maps uses its own tile layers, no need for tileUrl/tileOptions
+				locale: 'en',
+				messages: {
+					en: {
+						// No direct tile error for built-in Google Maps layers
+						buttonClickError: 'No details URL available.',
+						buttonClickSuccess: url => `Opening: ${url}`
+					}
+				}
+			};
+			
+			/**
+			* ------------------------------------------------------------
+			* Helper to create SVG data URL for custom marker icons
+			* ------------------------------------------------------------
+			*/
+			const createSvgIcon = (fillColor, borderColor, size, radiusRatio = 0.5) => {
+				const strokeWidth = 2;
+				const actualRadius = (size / 2) - strokeWidth;
+				const svgContent = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}"><circle cx="${size/2}" cy="${size/2}" r="${actualRadius}" fill="${fillColor}" stroke="${borderColor}" stroke-width="${strokeWidth}"/></svg>`;
+				return {
+					url: `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svgContent)}`,
+					scaledSize: new google.maps.Size(size, size),
+					anchor: new google.maps.Point(size / 2, size / 2),
+				};
+			};
+			
+			/**
+			* ------------------------------------------------------------
+			* Custom Marker Cluster Renderer (replaces Leaflet's iconCreateFunction)
+			* This class determines the appearance of the cluster markers.
+			* ------------------------------------------------------------
+			*/
+			class CustomMarkerClusterRenderer {
+				constructor(map) {
+					this.map = map;
+				}
+				
+				render({ count, position }) {
+					let size = 30;
+					let bgColor = '#e0f2f7'; // Lightest blue
+					let fontSize = '12px';
+					
+					if (count >= 50) {
+						size = 50;
+						bgColor = '#90caf9'; // Darker blue
+						fontSize = '16px';
+					} else if (count >= 10) {
+						size = 40;
+						bgColor = '#bbdefb'; // Medium blue
+						fontSize = '14px';
+					}
+					
+					// Create the SVG for the cluster icon with dynamic size and color
+					const svgContent = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}"><circle cx="${size/2}" cy="${size/2}" r="${size/2 - 1}" fill="${bgColor}" stroke="#007bff" stroke-width="2"/></svg>`;
+					
+					return new google.maps.Marker({
+						position,
+						icon: {
+							url: `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svgContent)}`,
+							scaledSize: new google.maps.Size(size, size),
+							anchor: new google.maps.Point(size / 2, size / 2) // Center the icon
+						},
+						label: { // Text label inside the icon
+							text: String(count),
+							color: '#007bff', // Blue text color
+							fontSize: fontSize,
+							fontWeight: '600'
+						},
+						zIndex: Number(google.maps.Marker.MAX_ZINDEX) + count, // Bigger clusters appear on top
+						// animation: google.maps.Animation.DROP // Optional: Drop animation on load
+					});
+				}
+			}
+			
+			
+			/**
+			* ------------------------------------------------------------
+			* 3. Sample data: minimal set of MRT stations for demonstration
+			*/
+			const SG_MRT_STATIONS_SAMPLE = [
+				{ id: 1, name: "ADMIRALTY MRT STATION", lat: 1.44058500109, lng: 103.800988001,
+					imageUrl: "https://upload.wikimedia.org/wikipedia/commons/thumb/e/e0/Admiralty_MRT_station.jpg/300px-Admiralty_MRT_station.jpg",
+					description: "A northern station serving the Woodlands area, known for its proximity to residential estates and Republic Polytechnic.",
+				lines: ["North South Line"], facilities: ["Lift", "Toilet"], detailsUrl: "https://en.wikipedia.org/wiki/Admiralty_MRT_station" },
+				{ id: 2, name: "ALJUNIED MRT STATION", lat: 1.31643261166, lng: 103.882906045,
+				lines: ["East West Line"] },
+				{ id: 3, name: "ANG MO KIO MRT STATION", lat: 1.36993317524, lng: 103.849558131,
+					imageUrl: "https://upload.wikimedia.org/wikipedia/commons/thumb/9/90/Ang_Mo_Kio_MRT_station.jpg/300px-Ang_Mo_Kio_MRT_station.jpg",
+					description: "A major interchange in the heart of Ang Mo Kio town centre, connecting commuters to various amenities and a large bus interchange.",
+				lines: ["North South Line", "Cross Island Line (Future)"], facilities: ["Mall", "Bus Interchange", "Retail"], detailsUrl: "https://en.wikipedia.org/wiki/Ang_Mo_Kio_MRT_station" },
+				{ id: 4, name: "BARTLEY MRT STATION", lat: 1.34250117776, lng: 103.880177899,
+				lines: ["Circle Line"] },
+				{ id: 5, name: "BAYFRONT MRT STATION", lat: 1.28187378849, lng: 103.859079765,
+					imageUrl: "https://upload.wikimedia.org/wikipedia/commons/thumb/c/cf/Bayfront_MRT_Station_Exit_A_on_Bayfront_Avenue.jpg/300px-Bayfront_MRT_Station_Exit_A_on_Bayfront_Avenue.jpg",
+					description: "Located near iconic attractions like Marina Bay Sands, Gardens by the Bay, and the ArtScience Museum, making it a popular tourist hub.",
+				lines: ["Circle Line", "Downtown Line"], facilities: ["Tourist Info", "Direct Access to MBS", "Shopping"], detailsUrl: "https://en.wikipedia.org/wiki/Bayfront_MRT_station" },
+				// ... (rest of your existing SG_MRT_STATIONS_SAMPLE data)
+				{ id: 6, name: "BAYSHORE MRT STATION", lat: 1.31259162908, lng: 103.940968762 },
+				{ id: 7, name: "BEAUTY WORLD MRT STATION", lat: 1.34122317571, lng: 103.775794285 },
+				{ id: 8, name: "BEDOK MRT STATION", lat: 1.32397996889, lng: 103.929984495 },
+				{ id: 9, name: "BEDOK NORTH MRT STATION", lat: 1.33474211676, lng: 103.91797833 },
+				{ id: 10, name: "BEDOK RESERVOIR MRT STATION", lat: 1.33660782981, lng: 103.932234624 },
+				{ id: 11, name: "BEDOK SOUTH MRT STATION", lat: 1.31688894033, lng: 103.949065273 },
+				{ id: 12, name: "BENCOOLEN MRT STATION", lat: 1.29891843393, lng: 103.850353762 },
+				{ id: 13, name: "BENDEMEER MRT STATION", lat: 1.31367223254, lng: 103.862977987 },
+				{ id: 14, name: "BISHAN MRT STATION", lat: 1.35130868012, lng: 103.849154419 },
+				{ id: 15, name: "BOON KENG MRT STATION", lat: 1.31933570911, lng: 103.861569454 },
+				{ id: 16, name: "BOON LAY MRT STATION", lat: 1.3386040545, lng: 103.706064623 },
+				{ id: 17, name: "BOTANIC GARDENS MRT STATION", lat: 1.3224880711, lng: 103.816013994 },
+				{ id: 18, name: "BRADDELL MRT STATION", lat: 1.34010520725, lng: 103.846755921 },
+				{ id: 19, name: "BRAS BASAH MRT STATION", lat: 1.29686168653, lng: 103.850667372 },
+				{ id: 20, name: "BRIGHT HILL MRT STATION", lat: 1.36367137584, lng: 103.833631645 },
+				{ id: 21, name: "BUANGKOK MRT STATION", lat: 1.38287785815, lng: 103.893121565 },
+				{ id: 22, name: "BUGIS MRT STATION", lat: 1.3002646898, lng: 103.855614761 },
+				{ id: 23, name: "BUKIT BATOK MRT STATION", lat: 1.34903410858, lng: 103.749566764 },
+				{ id: 24, name: "BUKIT BROWN MRT STATION", lat: 1.33372888323, lng: 103.83068955 },
+				{ id: 25, name: "BUKIT GOMBAK MRT STATION", lat: 1.35861159108, lng: 103.751790911 },
+				{ id: 26, name: "BUKIT PANJANG MRT STATION", lat: 1.37900211672, lng: 103.761535115 },
+				{ id: 27, name: "BUONA VISTA MRT STATION", lat: 1.30663450449, lng: 103.790709404 },
+				{ id: 28, name: "CALDECOTT MRT STATION", lat: 1.33767450804, lng: 103.839529821 },
+				{ id: 29, name: "CANBERRA MRT STATION", lat: 1.44324371648, lng: 103.829578144 },
+				{ id: 30, name: "CASHEW MRT STATION", lat: 1.36981544888, lng: 103.764439214 },
+				{ id: 31, name: "CHANGI AIRPORT MRT STATION", lat: 1.35747897469, lng: 103.98788357,
+					imageUrl: "https://upload.wikimedia.org/wikipedia/commons/8/89/CG2_Changi_Airport_MRT_platforms_20200919_212555.jpg",
+					description: "The primary station serving Singapore Changi Airport, a vital hub connecting Singapore to the world.",
+				lines: ["East West Line"], facilities: ["Airport Check-in", "Dining", "Shopping"], detailsUrl: "https://en.wikipedia.org/wiki/Changi_Airport_MRT_station" },
+				{ id: 32, name: "CHINATOWN MRT STATION", lat: 1.28435957823, lng: 103.843426776,
+				lines: ["North East Line", "Downtown Line"] },
+				{ id: 33, name: "CHINESE GARDEN MRT STATION", lat: 1.34235282087, lng: 103.732596738 },
+				{ id: 34, name: "CHOA CHU KANG MRT STATION", lat: 1.38536316535, lng: 103.74437078 },
+				{ id: 35, name: "CITY HALL MRT STATION", lat: 1.29293624285, lng: 103.852585892 },
+				{ id: 36, name: "CLARKE QUAY MRT STATION", lat: 1.2883860242, lng: 103.846555209 },
+				{ id: 37, name: "CLEMENTI MRT STATION", lat: 1.31520126395, lng: 103.765182447 },
+				{ id: 38, name: "COMMONWEALTH MRT STATION", lat: 1.30250853671, lng: 103.798226128 },
+				{ id: 39, name: "DAKOTA MRT STATION", lat: 1.30854798428, lng: 103.889064718 },
+				{ id: 40, name: "DHOBY GHAUT MRT STATION", lat: 1.29870130663, lng: 103.846115155 },
+				{ id: 41, name: "DOVER MRT STATION", lat: 1.31140529293, lng: 103.778637842 },
+				{ id: 42, name: "DOWNTOWN MRT STATION", lat: 1.27944619038, lng: 103.852840444 },
+				{ id: 43, name: "ESPLANADE MRT STATION", lat: 1.2936577248, lng: 103.855081226 },
+				{ id: 44, name: "EUNOS MRT STATION", lat: 1.3198383468, lng: 103.903626852 },
+				{ id: 45, name: "EXPO MRT STATION", lat: 1.33538213733, lng: 103.962375707 },
+				{ id: 46, name: "FARRER PARK MRT STATION", lat: 1.31190557366, lng: 103.853477716 },
+				{ id: 47, name: "FARRER ROAD MRT STATION", lat: 1.31743915137, lng: 103.807379214 },
+				{ id: 48, name: "FORT CANNING MRT STATION", lat: 1.29247892792, lng: 103.84432827 },
+				{ id: 49, name: "GARDENS BY THE BAY MRT STATION", lat: 1.27914567316, lng: 103.868024688 },
+				{ id: 50, name: "GEYLANG BAHRU MRT STATION", lat: 1.32150583802, lng: 103.871900626 },
+				{ id: 51, name: "GREAT WORLD MRT STATION", lat: 1.2938147349, lng: 103.833725122 },
+				{ id: 52, name: "GUL CIRCLE MRT STATION", lat: 1.31950521494, lng: 103.660552957 },
+				{ id: 53, name: "HARBOURFRONT MRT STATION", lat: 1.26538938442, lng: 103.821530157 },
+				{ id: 54, name: "HAW PAR VILLA MRT STATION", lat: 1.28257135831, lng: 103.781752725 },
+				{ id: 55, name: "HILLVIEW MRT STATION", lat: 1.36234486762, lng: 103.767418254 },
+				{ id: 56, name: "HOLLAND VILLAGE MRT STATION", lat: 1.31224029607, lng: 103.796399122 },
+				{ id: 57, name: "HOUGANG MRT STATION", lat: 1.37129229258, lng: 103.892380519 },
+				{ id: 58, name: "JALAN BESAR MRT STATION", lat: 1.30517138759, lng: 103.855295714 },
+				{ id: 59, name: "JOO KOON MRT STATION", lat: 1.32771717309, lng: 103.678375144 },
+				{ id: 60, name: "JURONG EAST MRT STATION", lat: 1.33315261989, lng: 103.742286544 },
+				{ id: 61, name: "KAKI BUKIT MRT STATION", lat: 1.33496730156, lng: 103.908459734 },
+				{ id: 62, name: "KALLANG MRT STATION", lat: 1.31148890964, lng: 103.871386541 },
+				{ id: 63, name: "KATONG PARK MRT STATION", lat: 1.29794790462, lng: 103.886080218 },
+				{ id: 64, name: "KEMBANGAN MRT STATION", lat: 1.32103824885, lng: 103.912949388 },
+				{ id: 65, name: "KENT RIDGE MRT STATION", lat: 1.29353698614, lng: 103.784572367 },
+				{ id: 66, name: "KHATIB MRT STATION", lat: 1.41738337015, lng: 103.832979909 },
+				{ id: 67, name: "KING ALBERT PARK MRT STATION", lat: 1.33566276202, lng: 103.783399114 },
+				{ id: 68, name: "KOVAN MRT STATION", lat: 1.36017917027, lng: 103.885064856,
+					description: "A station serving the Kovan residential area, known for its vibrant hawker centres and community spaces.",
+				lines: ["North East Line"], detailsUrl: "https://en.wikipedia.org/wiki/Kovan_MRT_station" },
+				{ id: 69, name: "KRANJI MRT STATION", lat: 1.42508698033, lng: 103.762137459 },
+				{ id: 70, name: "LABRADOR PARK MRT STATION", lat: 1.27225417751, lng: 103.802631578 },
+				{ id: 71, name: "LAKESIDE MRT STATION", lat: 1.3442592503, lng: 103.720949268 },
+				{ id: 72, name: "LAVENDER MRT STATION", lat: 1.30739187936, lng: 103.86278461 },
+				{ id: 73, name: "LENTOR MRT STATION", lat: 1.38550657933, lng: 103.83574381 },
+				{ id: 74, name: "LITTLE INDIA MRT STATION", lat: 1.30680002531, lng: 103.849646967 },
+				{ id: 75, name: "LORONG CHUAN MRT STATION", lat: 1.35161217103, lng: 103.864151939 },
+				{ id: 76, name: "MACPHERSON MRT STATION", lat: 1.32615024251, lng: 103.889298596 },
+				{ id: 77, name: "MARINA BAY MRT STATION", lat: 1.2763111438, lng: 103.854604976 },
+				{ id: 78, name: "MARINA SOUTH MRT STATION", lat: 1.27460411039, lng: 103.863461786 },
+				{ id: 79, name: "MARINA SOUTH PIER MRT STATION", lat: 1.27102703618, lng: 103.862447516 },
+				{ id: 80, name: "MARINE PARADE MRT STATION", lat: 1.30263014513, lng: 103.904961932 },
+				{ id: 81, name: "MARINE TERRACE MRT STATION", lat: 1.30676267898, lng: 103.915232532 },
+				{ id: 82, name: "MARSILING MRT STATION", lat: 1.43252114828, lng: 103.774074641 },
+				{ id: 83, name: "MARYMOUNT MRT STATION", lat: 1.34870726302, lng: 103.839423133 },
+				{ id: 84, name: "MATTAR MRT STATION", lat: 1.32687671471, lng: 103.883247509 },
+				{ id: 85, name: "MAXWELL MRT STATION", lat: 1.28053158615, lng: 103.843847647 },
+				{ id: 86, name: "MAYFLOWER MRT STATION", lat: 1.3714631884, lng: 103.836567766 },
+				{ id: 87, name: "MOUNT PLEASANT MRT STATION", lat: 1.32851795368, lng: 103.834688254 },
+				{ id: 88, name: "MOUNTBATTEN MRT STATION", lat: 1.30620190483, lng: 103.882528081 },
+				{ id: 89, name: "NAPIER MRT STATION", lat: 1.30678307773, lng: 103.818967004 },
+				{ id: 90, name: "NEWTON MRT STATION", lat: 1.31232009956, lng: 103.8379853 },
+				{ id: 91, name: "NICOLL HIGHWAY MRT STATION", lat: 1.29976683527, lng: 103.863637018 },
+				{ id: 92, name: "NOVENA MRT STATION", lat: 1.32044079085, lng: 103.843825619 },
+				{ id: 93, name: "ONE-NORTH MRT STATION", lat: 1.29975987859, lng: 103.787457508 },
+				{ id: 94, name: "ORCHARD BOULEVARD MRT STATION", lat: 1.30242224794, lng: 103.823868523 },
+				{ id: 95, name: "ORCHARD MRT STATION", lat: 1.30398101334, lng: 103.832241452 },
+				{ id: 96, name: "OUTRAM PARK MRT STATION", lat: 1.27973970676, lng: 103.839513521 },
+				{ id: 97, name: "PASIR PANJANG MRT STATION", lat: 1.27621352269, lng: 103.791350313 },
+				{ id: 98, name: "PASIR RIS MRT STATION", lat: 1.37304321199, lng: 103.949284605 },
+				{ id: 99, name: "PAYA LEBAR MRT STATION", lat: 1.3172473855, lng: 103.892260754 },
+				{ id: 100, name: "PIONEER MRT STATION", lat: 1.3375868822, lng: 103.697321513 },
+				{ id: 101, name: "POTONG PASIR MRT STATION", lat: 1.33137952462, lng: 103.869055665 },
+				{ id: 102, name: "PROMENADE MRT STATION", lat: 1.29289175425, lng: 103.8608918 },
+				{ id: 103, name: "PUNGGOL MRT STATION", lat: 1.40454672779, lng: 103.902072638 },
+				{ id: 104, name: "QUEENSTOWN MRT STATION", lat: 1.29455085173, lng: 103.806077156 },
+				{ id: 105, name: "RAFFLES PLACE MRT STATION", lat: 1.28412561057, lng: 103.851461712,
+					imageUrl: "https://landtransportguru.net/web/wp-content/uploads/2016/06/nsl_ns9_mar16-1.jpg",
+					description: "A bustling financial district station, with connections to many office buildings and landmarks. One of Singapore's oldest MRT stations.",
+				lines: ["East West Line", "North South Line"], facilities: ["ATM", "Food Court", "Retail"], detailsUrl: "https://en.wikipedia.org/wiki/Raffles_Place_MRT_station" },
+				{ id: 106, name: "REDHILL MRT STATION", lat: 1.28963453338, lng: 103.81674097 },
+				{ id: 107, name: "ROCHOR MRT STATION", lat: 1.30385218548, lng: 103.852769429 },
+				{ id: 108, name: "SEMBAWANG MRT STATION", lat: 1.44905082123, lng: 103.820046141 },
+				{ id: 109, name: "SENGKANG MRT STATION", lat: 1.3916946261, lng: 103.895484694 },
+				{ id: 110, name: "SERANGOON MRT STATION", lat: 1.35063361483, lng: 103.872771661 },
+				{ id: 111, name: "SHENTON WAY MRT STATION", lat: 1.27773021973, lng: 103.850405709 },
+				{ id: 112, name: "SIGLAP MRT STATION", lat: 1.30999484426, lng: 103.930297049 },
+				{ id: 113, name: "SIMEI MRT STATION", lat: 1.34320289493, lng: 103.953371694 },
+				{ id: 114, name: "SIXTH AVENUE MRT STATION", lat: 1.33085764535, lng: 103.796906839 },
+				{ id: 115, name: "SOMERSET MRT STATION", lat: 1.30025287693, lng: 103.839158337 },
+				{ id: 116, name: "SPRINGLEAF MRT STATION", lat: 1.39757790701, lng: 103.817799543 },
+				{ id: 117, name: "STADIUM MRT STATION", lat: 1.30281246884, lng: 103.875337711 },
+				{ id: 118, name: "STEVENS MRT STATION", lat: 1.32006555791, lng: 103.826024402 },
+				{ id: 119, name: "SUNGEI BEDOK MRT STATION", lat: 1.32039875927, lng: 103.957242034 },
+				{ id: 120, name: "TAI SENG MRT STATION", lat: 1.33510208536, lng: 103.888433013 },
+				{ id: 121, name: "TAMPINES EAST MRT STATION", lat: 1.35619148304, lng: 103.954634463 },
+				{ id: 122, name: "TAMPINES MRT STATION", lat: 1.35330153288, lng: 103.945144689 },
+				{ id: 123, name: "TAMPINES WEST MRT STATION", lat: 1.3455153053, lng: 103.938436971 },
+				{ id: 124, name: "TAN KAH KEE MRT STATION", lat: 1.32555623509, lng: 103.807760305 },
+				{ id: 125, name: "TANAH MERAH MRT STATION", lat: 1.32718713454, lng: 103.946346461 },
+				{ id: 126, name: "TANJONG KATONG MRT STATION", lat: 1.2992544132, lng: 103.897377093 },
+				{ id: 127, name: "TANJONG PAGAR MRT STATION", lat: 1.27660448672, lng: 103.845952195 },
+				{ id: 128, name: "TANJONG RHU MRT STATION", lat: 1.29721821836, lng: 103.873488357 },
+				{ id: 129, name: "TELOK AYER MRT STATION", lat: 1.28206894778, lng: 103.848648781 },
+				{ id: 130, name: "TELOK BLANGAH MRT STATION", lat: 1.27070647762, lng: 103.809761611 },
+				{ id: 131, name: "TIONG BAHRU MRT STATION", lat: 1.28619457933, lng: 103.82699894 },
+				{ id: 132, name: "TOA PAYOH MRT STATION", lat: 1.33262898712, lng: 103.847501764 },
+				{ id: 133, name: "TUAS CRESCENT MRT STATION", lat: 1.32102655324, lng: 103.649075477 },
+				{ id: 134, name: "TUAS LINK MRT STATION", lat: 1.34086609564, lng: 103.636985602 },
+				{ id: 135, name: "TUAS WEST ROAD MRT STATION", lat: 1.32998908905, lng: 103.639614056 },
+				{ id: 136, name: "UBI MRT STATION", lat: 1.3299746288, lng: 103.899226655 },
+				{ id: 137, name: "UPPER CHANGI MRT STATION", lat: 1.34173748389, lng: 103.961471789 },
+				{ id: 138, name: "UPPER THOMSON MRT STATION", lat: 1.35441643373, lng: 103.832898468 },
+				{ id: 139, name: "WOODLANDS MRT STATION", lat: 1.43696824734, lng: 103.786462452 },
+				{ id: 140, name: "WOODLANDS NORTH MRT STATION", lat: 1.44746541049, lng: 103.786500735 },
+				{ id: 141, name: "WOODLANDS SOUTH MRT STATION", lat: 1.42743341606, lng: 103.793244602 },
+				{ id: 142, name: "WOODLEIGH MRT STATION", lat: 1.33919004553, lng: 103.870818309 },
+				{ id: 143, name: "XILIN MRT STATION", lat: 1.32889914133, lng: 103.965218532 },
+				{ id: 144, name: "YEW TEE MRT STATION", lat: 1.39753501779, lng: 103.747405114 },
+				{ id: 145, name: "YIO CHU KANG MRT STATION", lat: 1.38175604611, lng: 103.84494729 },
+				{ id: 146, name: "YISHUN MRT STATION", lat: 1.42944308081, lng: 103.835005046 },
+				{ id: 147, name: "BAKAU LRT STATION", lat: 1.38799293427, lng: 103.905413992 },
+				{ id: 148, name: "BANGKIT LRT STATION", lat: 1.38002223, lng: 103.772647371 },
+				{ id: 149, name: "BEACH LRT STATION", lat: 1.25129010168, lng: 103.817802341 },
+				{ id: 150, name: "BUKIT PANJANG LRT STATION", lat: 1.37792612944, lng: 103.763103024 },
+				{ id: 151, name: "CHENG LIM LRT STATION", lat: 1.39627763134, lng: 103.893797181 },
+				{ id: 152, name: "CHOA CHU KANG LRT STATION", lat: 1.38475541073, lng: 103.744537697 },
+				{ id: 153, name: "COMPASSVALE LRT STATION", lat: 1.3944930462, lng: 103.900492451 },
+				{ id: 154, name: "CORAL EDGE LRT STATION", lat: 1.39390922612, lng: 103.912580855 },
+				{ id: 155, name: "COVE LRT STATION", lat: 1.39928198502, lng: 103.905961944 },
+				{ id: 156, name: "DAMAI LRT STATION", lat: 1.40523483617, lng: 103.908603544 },
+				{ id: 157, name: "FAJAR LRT STATION", lat: 1.38452079708, lng: 103.770808583 },
+				{ id: 158, name: "FARMWAY LRT STATION", lat: 1.39717019646, lng: 103.88930481 },
+				{ id: 159, name: "FERNVALE LRT STATION", lat: 1.39188588774, lng: 103.876308611 },
+				{ id: 160, name: "IMBIAH LRT STATION", lat: 1.25393663355, lng: 103.819500006 },
+				{ id: 161, name: "JELAPANG LRT STATION", lat: 1.38670302501, lng: 103.764503338 },
+				{ id: 162, name: "KADALOOR LRT STATION", lat: 1.39950911282, lng: 103.916574965 },
+				{ id: 163, name: "KANGKAR LRT STATION", lat: 1.38395911467, lng: 103.902225371 },
+				{ id: 164, name: "KEAT HONG LRT STATION", lat: 1.37860276598, lng: 103.749055519 },
+				{ id: 165, name: "KUPANG LRT STATION", lat: 1.3982128284, lng: 103.881256222 },
+				{ id: 166, name: "LAYAR LRT STATION", lat: 1.39207983877, lng: 103.880029601 },
+				{ id: 167, name: "MERIDIAN LRT STATION", lat: 1.39691205306, lng: 103.908950217 },
+				{ id: 168, name: "NIBONG LRT STATION", lat: 1.41187045845, lng: 103.900313818 },
+				{ id: 169, name: "OASIS LRT STATION", lat: 1.40228667749, lng: 103.912727356 },
+				{ id: 170, name: "PENDING LRT STATION", lat: 1.3761357435, lng: 103.771261176 },
+				{ id: 171, name: "PETIR LRT STATION", lat: 1.37775033382, lng: 103.76666896 },
+				{ id: 172, name: "PHOENIX LRT STATION", lat: 1.37861884445, lng: 103.758034099 },
+				{ id: 173, name: "PUNGGOL LRT STATION", lat: 1.4051947013, lng: 103.902411912 },
+				{ id: 174, name: "PUNGGOL POINT LRT STATION", lat: 1.4168485205, lng: 103.90665079 },
+				{ id: 175, name: "RANGGUNG LRT STATION", lat: 1.38423356067, lng: 103.89719467 },
+				{ id: 176, name: "RENJONG LRT STATION", lat: 1.38672392153, lng: 103.890539427 },
+				{ id: 177, name: "RIVIERA LRT STATION", lat: 1.39452449577, lng: 103.916166059 },
+				{ id: 178, name: "RUMBIA LRT STATION", lat: 1.39146849684, lng: 103.905973595 },
+				{ id: 179, name: "SAM KEE LRT STATION", lat: 1.40961268509, lng: 103.904831551 },
+				{ id: 180, name: "SAMUDERA LRT STATION", lat: 1.41590171944, lng: 103.902156316 },
+				{ id: 181, name: "SEGAR LRT STATION", lat: 1.38777213086, lng: 103.769598397 },
+				{ id: 182, name: "SENGKANG LRT STATION", lat: 1.39160936382, lng: 103.895442584 },
+				{ id: 183, name: "SENJA LRT STATION", lat: 1.38269229582, lng: 103.762367226 },
+				{ id: 184, name: "SENTOSA LRT STATION", lat: 1.26505084303, lng: 103.821624581 },
+				{ id: 185, name: "SOO TECK LRT STATION", lat: 1.40508858485, lng: 103.89720965 },
+				{ id: 186, name: "SOUTH VIEW LRT STATION", lat: 1.38032100849, lng: 103.7452918 },
+				{ id: 187, name: "SUMANG LRT STATION", lat: 1.40845242565, lng: 103.898558454 },
+				{ id: 188, name: "TECK LEE LRT STATION", lat: 1.41277089386, lng: 103.906577623 },
+				{ id: 189, name: "TECK WHYE LRT STATION", lat: 1.37668467944, lng: 103.753712232 },
+				{ id: 190, name: "TEN MILE JUNCTION LRT STATION", lat: 1.38032100849, lng: 103.760139777 },
+				{ id: 191, name: "THANGGAM LRT STATION", lat: 1.3973181559, lng: 103.875635156 },
+				{ id: 192, name: "TONGKANG LRT STATION", lat: 1.38934795386, lng: 103.88584415 },
+				{ id: 193, name: "WATERFRONT LRT STATION", lat: 1.25553213262, lng: 103.820949651 }
+			];
+			
+			/**
+			* ------------------------------------------------------------
+			* 4. Toast helper: show brief messages at top-right
+			*/
+			const toastEl = document.getElementById('toast');
+			function showToast(message, duration = 3000) {
+				toastEl.textContent = message;
+				toastEl.classList.add('show');
+				setTimeout(() => toastEl.classList.remove('show'), duration);
+			}
+			
+			/**
+			* ------------------------------------------------------------
+			* 5. MapApp: encapsulate all map logic for clarity
+			*    Wrapped in a global `initMap` for Google Maps API callback
+			*/
+			const MapApp = {
+				map: null,
+				markerClusterer: null,
+				infoWindow: null, // Use a single InfoWindow instance
+				markersArray: [], // Array to hold all individual Google Maps Markers
+				
+				// Initialize map and layers
+				initMap() {
+					this.map = new google.maps.Map(document.getElementById('map'), {
+						center: { lat: CONFIG.mapCenter[0], lng: CONFIG.mapCenter[1] },
+						zoom: CONFIG.mapZoom,
+						mapTypeId: google.maps.MapTypeId.ROADMAP, // Default map type (roadmap, satellite, hybrid, terrain)
+						streetViewControl: false, // Hide Street View Pegman
+						mapTypeControl: false, // Hide map type selector
+						fullscreenControl: false // Hide fullscreen button
+					});
+					
+					// Initialize MarkerClusterer with our custom renderer
+					this.markerClusterer = new markerClusterer.MarkerClusterer({
+						map: this.map,
+						markers: [], // Markers will be added later
+						renderer: new CustomMarkerClusterRenderer(this.map),
+						maxZoom: 14 // Optional: Stop clustering at a certain zoom level
+					});
+					
+					// Initialize a single InfoWindow instance for all markers
+					this.infoWindow = new google.maps.InfoWindow();
+					
+					// Load data and add markers
+					this.loadData();
+				},
+				
+				// Load data and add markers
+				loadData() {
+					this.addMarkers(SG_MRT_STATIONS_SAMPLE);
+				},
+				
+				// Add each station as a marker + popup
+				addMarkers(data) {
+					const bounds = new google.maps.LatLngBounds(); // To calculate bounds for fitting all markers
+					
+					data.forEach(station => {
+						if (!station.lat || !station.lng) return;
+						
+						const position = { lat: station.lat, lng: station.lng };
+						
+						// Create marker with custom SVG icon
+						const marker = new google.maps.Marker({
+							position: position,
+							icon: createSvgIcon('#007bff', '#fff', 16) // Blue dot with white border
+						});
+						
+						// Prepare popup content as a DOM element to attach event listeners
+						const popupContentDiv = document.createElement('div');
+						popupContentDiv.className = 'mrt-popup-content';
+						popupContentDiv.innerHTML = `
+						<h4>${station.name}</h4>
+						${station.imageUrl ? `<img src="${station.imageUrl}" class="popup-image" alt="${station.name}" onerror="this.style.display='none'">` : ''}
+						${station.description ? `<p>${station.description}</p>` : ''}
+						<table>
+							${station.lines ? `<tr><td>Lines:</td><td>${station.lines.join(', ')}</td></tr>` : ''}
+							${station.facilities ? `<tr><td>Facilities:</td><td>${station.facilities.join(', ')}</td></tr>` : ''}
+						</table>
+						${station.detailsUrl ? `<button class="popup-button" data-url="${station.detailsUrl}">View Details</button>` : ''}
+						`;
+						
+						// Attach button listener to the popup content element
+						const popupButton = popupContentDiv.querySelector('.popup-button');
+						if (popupButton) {
+							popupButton.addEventListener('click', () => {
+								const url = popupButton.dataset.url;
+								if (url) {
+									window.open(url, '_blank');
+									showToast(CONFIG.messages.en.buttonClickSuccess(url));
+								} else {
+									showToast(CONFIG.messages.en.buttonClickError);
+								}
+							});
+						}
+						
+						// Add a click listener to the marker to open the info window
+						marker.addListener('click', () => {
+							this.infoWindow.setContent(popupContentDiv);
+							this.infoWindow.open(this.map, marker);
+						});
+						
+						this.markersArray.push(marker); // Add to our array
+						bounds.extend(position); // Extend map bounds
+					});
+					
+					// Add all markers to the clusterer
+					this.markerClusterer.addMarkers(this.markersArray);
+					
+					// Fit map bounds to show all markers
+					if (!bounds.isEmpty()) {
+						this.map.fitBounds(bounds, {
+							top: 50, right: 50, bottom: 50, left: 50 // Padding around the bounds
+						});
+					}
+				}
+			};
+			
+			// Google Maps API calls this function once the API is loaded
+			window.initMap = () => {
+				MapApp.initMap();
+			};
+		</script>
+	</body>
+</html>
